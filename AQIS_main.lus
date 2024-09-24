@@ -1,0 +1,86 @@
+node AQIS_Comprehensive(
+    -- Inputs
+    product_detected: bool;
+    is_defect_present: bool;
+    critical_anomaly: bool;
+    system_fault: bool;
+    is_false_positive: bool;
+
+    -- Outputs
+    eject_product: bool;
+    stop_conveyor: bool;
+    reset_system: bool
+) returns (
+    -- Verification Flags
+    detection_violation: bool;
+    false_positive_violation: bool;
+    response_violation: bool;
+    stability_violation: bool;
+    delay_violation: bool
+)
+let
+    -- Detection Guarantee
+    detection_timer = if product_detected then pre(detection_timer) + 1 else 0;
+    detection_violation = product_detected and (detection_timer > ceil(2.0 / TIME_PER_TICK));
+
+    -- False Positive Constraint
+    false_positive_count = pre(false_positive_count) + (is_false_positive as int) - 
+                            (pre(window_buffer)[0] as int);
+    window_buffer: array [0..99] of int = 
+        (is_false_positive as int) :: pre(window_buffer)[0..98];
+    false_positive_violation = false_positive_count > 1;
+
+    -- Response Correctness
+    response_timer = if (pre(anomaly_flag) /= anomaly_flag and anomaly_flag) 
+                     then 1 
+                     else if anomaly_flag then pre(response_timer) + 1 
+                     else 0;
+    response_violation = anomaly_flag and (response_timer > ceil(0.5 / TIME_PER_TICK)) and 
+                         not (eject_product or stop_conveyor);
+
+    -- System Stability
+    valid_stop = critical_anomaly or system_fault;
+    stability_violation = stop_conveyor and not valid_stop;
+
+    -- No Unbounded Delays (Simplified)
+    -- Example: Transition from Monitoring to Anomaly_Detected within time limit
+    current_state = if pre(eject_product or stop_conveyor) then Action_Initiated
+                    else if product_detected then Monitoring
+                    else Idle;
+    next_state = 
+        if (eject_product or stop_conveyor) then Action_Initiated
+        else if product_detected then Monitoring
+        else Idle;
+
+    transition_timer = if current_state /= pre(current_state) then 1 
+                       else pre(transition_timer) + 1;
+    delay_violation = transition_timer > ceil(1.0 / TIME_PER_TICK);
+
+    -- Actions
+    eject_product = anomaly_flag and not is_false_positive;
+    stop_conveyor = critical_anomaly or system_fault or (anomaly_flag and response_timer <= 
+                    ceil(0.5 / TIME_PER_Tick));
+
+    reset_system = eject_product or stop_conveyor;
+tel
+
+-- Property: An anomaly must be detected within 2 seconds of detection
+PROPERTY Detection_Guarantee:
+    always (product_detected -> eventually within 2.0
+        anomaly_flag);
+
+-- Invariant: If false_positive_count > 1 then violation must be true
+PROPERTY False_Positive_Invariant:
+    always (false_positive_count > MAX_FALSE_POSITIVES -> violation);
+
+-- Property: Response is always correct within the time limit
+PROPERTY Response_Correctness_Property:
+    never response_violation;
+
+-- Property: Conveyor is stopped only under critical conditions
+PROPERTY System_Stability_Property:
+    always (stop_conveyor -> (critical_anomaly or system_fault));
+
+-- Property: No state transition experiences an unbounded delay
+PROPERTY No_Unbounded_Delays_Property:
+    never delay_violation;
